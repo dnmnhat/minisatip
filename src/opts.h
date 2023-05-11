@@ -3,8 +3,8 @@
 
 #define _GNU_SOURCE
 
-#include <time.h>
 #include <stdint.h>
+#include <time.h>
 
 struct struct_opts {
     char *rrtp;
@@ -30,12 +30,14 @@ struct struct_opts {
     int device_id;
     int bootid;
     int dvr_buffer;
+    int satipc_buffer;
     int adapter_buffer;
     int output_buffer;
     int udp_threshold;
     int tcp_threshold;
     int force_scan;
     int clean_psi;
+    int send_all_ecm;
     int file_line;
     char *last_log;
     int dvbapi_port;

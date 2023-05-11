@@ -130,12 +130,15 @@ int rtsp, http, si, si1, ssdp1;
 #define CA_PIN_OPT '3'
 #define IPV4_OPT '4'
 #define NO_PIDS_ALL_OPT 'k'
-#define CA_MULTIPLE_PMT_OPT 'c'
+#define CA_CHANNELS_OPT 'c'
 #define CACHE_DIR_OPT 'z'
 #define DISABLE_CAT_OPT '5'
 // Options that don't have a short option available
 #define LONG_OPT_ONLY_START 1024
 #define VERSION_OPT (LONG_OPT_ONLY_START + 1)
+#define SENDALLECM_OPT (LONG_OPT_ONLY_START + 2)
+#define SATIPC_RECV_BUFFER_OPT (LONG_OPT_ONLY_START + 3)
+#define CLIENT_SEND_BUFFER_OPT (LONG_OPT_ONLY_START + 4)
 
 static const struct option long_options[] = {
     {"adapters", required_argument, NULL, ADAPTERS_OPT},
@@ -146,6 +149,8 @@ static const struct option long_options[] = {
     {"bind-dev", required_argument, NULL, BIND_DEV_OPT},
     {"cache-dir", required_argument, NULL, CACHE_DIR_OPT},
     {"clean-psi", no_argument, NULL, CLEANPSI_OPT},
+    {"send-all-ecm", no_argument, NULL, SENDALLECM_OPT},
+    {"client-send-buffer", required_argument, NULL, CLIENT_SEND_BUFFER_OPT},
     {"delsys", required_argument, NULL, DELSYS_OPT},
     {"debug", required_argument, NULL, DEBUG_OPT},
     {"device-id", required_argument, NULL, DEVICEID_OPT},
@@ -194,6 +199,7 @@ static const struct option long_options[] = {
     {"satip-servers", required_argument, NULL, SATIPCLIENT_OPT},
     {"satip-tcp", no_argument, NULL, SATIP_TCP_OPT},
     {"satip-xml", required_argument, NULL, SATIPXML_OPT},
+    {"satip-receive-buffer", required_argument, NULL, SATIPC_RECV_BUFFER_OPT},
 #endif
 #ifndef DISABLE_NETCVCLIENT
     {"netceiver", required_argument, NULL, NETCVCLIENT_OPT},
@@ -206,7 +212,7 @@ static const struct option long_options[] = {
 #ifndef DISABLE_DVBCA
     {"ca-pin", required_argument, NULL, CA_PIN_OPT},
     {"ci", required_argument, NULL, FORCE_CI_OPT},
-    {"multiple-pmt", required_argument, NULL, CA_MULTIPLE_PMT_OPT},
+    {"ca-channels", required_argument, NULL, CA_CHANNELS_OPT},
 #endif
 
     {0, 0, 0, 0}};
@@ -331,6 +337,11 @@ Help\n\
 * -B X : set the app socket write buffer to X KB. \n\
 	* eg: -B 10000 - to set the socket buffer to 10MB\n\
 \n\
+* --client-send-buffer X : set the socket write buffer for client connections to X KB. \n\
+	- The default value is 0, corresponding to use the kernel default value\n\
+	* eg: --satip-receive-buffer  100 - to set the socket buffer to 100KB\n\
+	* eg: --satip-receive-buffer 1024 - to set the socket buffer to 1MB\n\
+\n\
 * -z --cache-dir dir : set the app cache directory to dir. The directory will be created if it doesn't exist. \n\
 	* defaults to /var/cache/minisatip \n\
 \n\
@@ -402,6 +413,9 @@ Help\n\
 	* If the snr or the strength multipliers are set to 0, minisatip will override the value received from the adapter and will report always full signal 100%% \n\
 	* eg: -M 4-6:1.2-1.3 - multiplies the strength with 1.2 and the snr with 1.3 for adapter 4, 5 and 6\n\
 	* eg: -M *:1.5-1.6 - multiplies the strength with 1.5 and the snr with 1.6 for all adapters\n\
+	* [%%] This symbol forces to read values as percentage\n\
+	* [#] This symbol forces to read values as decibels\n\
+	* eg: -M *:%%1.0-#1.0 - not multiply the strength but force it as percentage and for the snr interpret it as decibels\n\
 \n\
 * -N --disable-dvb disable DVB adapter detection\n \
 \n\
@@ -437,6 +451,7 @@ Help\n\
 	192.168.9.9 is the host where oscam is running and 9000 is the port configured in dvbapi section in oscam.conf.\n\
 	* eg: -o /tmp/camd.socket \n\
 	/tmp/camd.socket is the local socket that can be used \n\
+* --send-all-ecm Pass all received ECM to the DVBAPI server. Warning: This option may overload your server. Use with caution. Not necessary for regular use.\n\
 \n\
 "
 #endif
@@ -473,10 +488,16 @@ Help\n\
 	address 192.168.1.100 needs to be assigned to an interface on the server running minisatip.\n\
 	This feature is useful for AVM FRITZ!WLAN Repeater\n\
 	\n\
-*  --satip-xml <URL> Use the xml retrieved from a satip server to configure satip adapters \n\
+* -6 --satip-xml <URL> Use the xml retrieved from a satip server to configure satip adapters \n\
 	eg: --satip-xml http://localhost:8080/desc.xml \n\
 \n\
 * -O --satip-tcp Use RTSP over TCP instead of UDP for data transport \n\
+\n\
+* --satip-receive-buffer X : set the socket read buffer for connecting to SAT>IP servers to X KB. \n\
+	- The default value is 0, corresponding to use the kernel default value\n\
+	* eg: --satip-receive-buffer  350 - to set the socket buffer to 350KB\n\
+	* eg: --satip-receive-buffer 1024 - to set the socket buffer to 1MB\n\
+\n\
 "
 #endif
         "\
@@ -560,12 +581,13 @@ Help\n\
 \t* The format is: ADAPTER1:PIN,ADAPTER2-ADAPTER4\n\
 			* eg : 0,2-3\n\
 \n\
-* -c --multiple-pmt adapter_list:maximum_number_of_channels_supported: Enable 2 PMTs inside of the same CAPMT to double the number of decrypted channels\n\
-\t* The format is: ADAPTER1:MAX_CHANNELS[-CAID1[-CAID2]...,ADAPTER2:MAX_CHANNELS[-CAID3[-CAID4]...]\n\
-			* eg : 0:1-100\n\
-The DDCI adapters 0 will support maximum of 1 CAPMT (2 channels) and will use CAID1. If CAID is not specified it will use CAMs CAIDs\n\
+* -c --ca-channels adapter_list:maximum_number_of_channels_supported: Specify the number of channels supported by the CAM and override the CAIDs\n\
+\t* The format is: ADAPTER1:[*]MAX_CHANNELS[-CAID1[-CAID2]...,ADAPTER2:MAX_CHANNELS[-CAID3[-CAID4]...] \n\
+\t\t * before the MAX_CHANNELS enable 2 PMTs inside of the same CAPMT to double the number of decrypted channels\n\
+			* eg : 0:*1-100\n\
+The DDCI adapters 0 will support maximum of 1 CAPMT (2 channels because of *) and will use CAID1. If CAID is not specified it will use CAMs CAIDs\n\
 Official CAMs support 1 or 2 channels, with this option this is extended to 2 or 4\n\
-By default every CAM supports 4 channels\n\
+By default every CAM supports 1 channels\n\
 \n\
 "
 #endif
@@ -615,6 +637,10 @@ void set_options(int argc, char *argv[]) {
     int is_log = 0;
     char *lip;
     memset(&opts, 0, sizeof(opts));
+    if (access("/etc/enigma2/settings", F_OK) == 0) {
+        opts.enigma = 1;
+    }
+
     opts.command_line = get_command_line_string(argc, argv);
     opts.log = 1;
     opts.debug = 0;
@@ -640,7 +666,6 @@ void set_options(int argc, char *argv[]) {
 #ifndef DISABLE_SATIPCLIENT
     opts.satip_addpids = 1;
 #endif
-    opts.output_buffer = 2 * 1024 * 1024;
     opts.document_root = "html";
     opts.cache_dir = "/var/cache/minisatip";
     opts.xml_path = DESC_XML;
@@ -663,10 +688,11 @@ void set_options(int argc, char *argv[]) {
     opts.strength_multiplier = 1;
     opts.snr_multiplier = 1;
 
-    // set 1 to read TS packets from /dev/dvb/adapterX/demuxY instead of
-    // /dev/dvb/adapterX/dvrY set to 2 to set PSI and PES filters using
-    // different ioctl
-    opts.use_demux_device = 0;
+    opts.use_demux_device = USE_DVR;
+    if (opts.enigma) {
+        opts.use_demux_device = USE_PES_FILTERS_AND_DEMUX;
+        opts.emulate_pids_all = 1;
+    }
     opts.max_pids = 0;
     opts.dvbapi_offset =
         0; // offset for multiple dvbapi clients to the same server
@@ -696,8 +722,7 @@ void set_options(int argc, char *argv[]) {
             break;
         }
         case MAC_OPT: {
-            strncpy(opts.mac, optarg, 12);
-            opts.mac[12] = 0;
+            safe_strncpy(opts.mac, optarg);
             break;
         }
         case RRTP_OPT: {
@@ -752,7 +777,7 @@ void set_options(int argc, char *argv[]) {
             char *arg[50];
             int i;
             memset(buf, 0, sizeof(buf));
-            strncpy(buf, optarg, sizeof(buf) - 1);
+            safe_strncpy(buf, optarg);
             int la = split(arg, buf, ARRAY_SIZE(arg), ',');
             for (i = 0; i < la; i++) {
                 int level = check_strs(arg[i], loglevels, -1);
@@ -832,6 +857,12 @@ void set_options(int argc, char *argv[]) {
             break;
         }
 
+        case CLIENT_SEND_BUFFER_OPT: {
+            int val = atoi(optarg);
+            opts.output_buffer = val * 1024;
+            break;
+        }
+
         case THRESHOLD_OPT: {
             sscanf(optarg, "%d:%d", &opts.udp_threshold, &opts.tcp_threshold);
             if (opts.udp_threshold < 0)
@@ -853,6 +884,11 @@ void set_options(int argc, char *argv[]) {
 
         case CLEANPSI_OPT: {
             opts.clean_psi = 1;
+            break;
+        }
+
+        case SENDALLECM_OPT: {
+            opts.send_all_ecm = 1;
             break;
         }
 
@@ -949,7 +985,7 @@ void set_options(int argc, char *argv[]) {
             }
             char buf[100];
             memset(buf, 0, sizeof(buf));
-            strncpy(buf, optarg, sizeof(buf) - 1);
+            safe_strncpy(buf, optarg);
             if (buf[0] == '~') {
                 opts.pids_all_no_dec = 1;
                 memmove(&buf[0], &buf[1], sizeof(buf) - 1);
@@ -958,15 +994,15 @@ void set_options(int argc, char *argv[]) {
             if (sep2 != NULL) {
                 *sep2 = 0;
                 opts.dvbapi_offset = map_int(sep2 + 1, NULL);
-                strncpy(buf, optarg, sizeof(optarg) - 1 - strlen(sep2));
+                _strncpy(buf, optarg, sizeof(optarg) - 1 - strlen(sep2));
             }
             char *sep1 = strchr(buf, ':');
             if (sep1 != NULL) {
                 *sep1 = 0;
-                strncpy(opts.dvbapi_host, buf, sizeof(opts.dvbapi_host) - 1);
+                safe_strncpy(opts.dvbapi_host, buf);
                 opts.dvbapi_port = map_int(sep1 + 1, NULL);
             } else {
-                strncpy(opts.dvbapi_host, buf, sizeof(opts.dvbapi_host) - 1);
+                safe_strncpy(opts.dvbapi_host, buf);
                 opts.dvbapi_port = 9000;
             }
 #endif
@@ -982,6 +1018,7 @@ void set_options(int argc, char *argv[]) {
         case SATIPCLIENT_OPT:
         case SATIPXML_OPT:
         case SATIP_TCP_OPT:
+        case SATIPC_RECV_BUFFER_OPT:
 
             LOG("%s was not compiled with satip client support, please change "
                 "the "
@@ -1024,6 +1061,12 @@ void set_options(int argc, char *argv[]) {
         case SATIP_TCP_OPT:
             opts.satip_rtsp_over_tcp = 1;
             break;
+
+        case SATIPC_RECV_BUFFER_OPT: {
+            int val = atoi(optarg);
+            opts.satipc_buffer = val * 1024;
+            break;
+        }
 #endif
         case NETCVCLIENT_OPT: {
 #ifdef DISABLE_NETCVCLIENT
@@ -1067,7 +1110,8 @@ void set_options(int argc, char *argv[]) {
             break;
 
         case DROP_ENCRYPTED_OPT:
-            opts.drop_encrypted = (opts.drop_encrypted == 0) ? 2 : (opts.drop_encrypted - 1);
+            opts.drop_encrypted =
+                (opts.drop_encrypted == 0) ? 2 : (opts.drop_encrypted - 1);
             break;
 
         case XML_OPT:
@@ -1113,23 +1157,19 @@ void set_options(int argc, char *argv[]) {
             set_ca_adapter_force_ci(optarg);
             break;
 
-        case CA_MULTIPLE_PMT_OPT:
-            set_ca_multiple_pmt(optarg);
+        case CA_CHANNELS_OPT:
+            set_ca_channels(optarg);
             break;
 
 #endif
         }
     }
-    if (access("/etc/enigma2/settings", F_OK) == 0) {
-        opts.enigma = 1;
-    }
 
-    if (opts.enigma) {
-        opts.use_demux_device = 2;
-        opts.emulate_pids_all = 1;
-    }
+    if (!opts.bind)
+        lip = getlocalip();
+    else
+        lip = opts.bind;
 
-    lip = getlocalip();
     if (!opts.http_host) {
         opts.http_host = (char *)malloc1(MAX_HOST);
         sprintf(opts.http_host, "%s:%u", lip, opts.http_port);
@@ -1138,7 +1178,12 @@ void set_options(int argc, char *argv[]) {
     opts.rtsp_host = (char *)malloc1(MAX_HOST);
     sprintf(opts.rtsp_host, "%s:%d", lip, opts.rtsp_port);
 
-    opts.datetime_compile = (char *)malloc1(64);
+    LOG("Listening configuration RTSP:%s HTTP:%s (bind address: %s)",
+        opts.rtsp_host ? opts.rtsp_host : "(null)",
+        opts.http_host ? opts.http_host : "(null)",
+        opts.bind ? opts.bind : "(null)");
+
+    opts.datetime_compile = (char *)malloc(64);
     sprintf(opts.datetime_compile, "%s | %s", __DATE__, __TIME__);
 
     time(&opts.start_time);
@@ -1306,7 +1351,7 @@ int read_rtsp(sockets *s) {
         }
 
         if (useragent)
-            strncpy(sid->useragent, useragent, sizeof(sid->useragent) - 1);
+            safe_strncpy(sid->useragent, useragent);
 
         if ((strncasecmp(arg[0], "PLAY", 4) == 0) ||
             (strncasecmp(arg[0], "GET", 3) == 0))
@@ -1762,7 +1807,8 @@ int ssdp_reply(sockets *s) {
         rdid = strcasestr((const char *)s->buf, "DEVICEID.SES.COM:");
         if (rdid && opts.device_id == map_int(strip(rdid + 17), NULL)) {
             ptr = 0;
-            strcatf(buf, ptr, device_id_conflict, getlocalip(), opts.name_app,
+            strcatf(buf, ptr, device_id_conflict,
+                    opts.bind ? opts.bind : getlocalip(), opts.name_app,
                     version, opts.device_id);
             LOG("A new device joined the network with the same Device ID:  %s, "
                 "asking to change DEVICEID.SES.COM",
@@ -2018,6 +2064,17 @@ void http_response(sockets *s, int rc, char *ah, char *desc, int cseq, int lr) {
         proto = "HTTP";
     else
         proto = "RTSP";
+
+    // Check if the request is a "reGET" (successive non-standard HTTP request
+    // while streaming) Used when one HTTP client wants to change pids with a
+    // new GET request. This doesn't interrupts the streaming.
+    if (s->type == TYPE_HTTP && s->iteration > 1 && rc == 200) {
+        LOG("Reply hidden because another GET while streaming (handle %d) "
+            "[%s:%d] iteration:%d, sock %d",
+            s->sock, get_sockaddr_host(s->sa, ra, sizeof(ra)),
+            get_sockaddr_port(s->sa), s->iteration, s->id);
+        return;
+    }
 
     if (!ah || !ah[0])
         ah = public_str;

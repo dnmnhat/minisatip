@@ -93,7 +93,7 @@ typedef struct struct_cw {
     char cw_len;
     int16_t id;
     int64_t expiry, set_time;
-
+    void *opaque;
 } SCW;
 
 typedef struct struct_stream_pid {
@@ -176,7 +176,7 @@ typedef struct struct_filter {
 
 int register_algo(SCW_op *o);
 int send_cw(int pmt_id, int algo, int parity, uint8_t *cw, uint8_t *iv,
-            int64_t expiry);
+            int64_t expiry, void *opaque);
 
 extern int npmts;
 static inline SPMT *get_pmt(int id) {
@@ -223,14 +223,13 @@ int assemble_packet(SFilter *f, uint8_t *b);
 int clean_psi_buffer(uint8_t *pmt, uint8_t *clean, int clean_size);
 void disable_cw(int master_pmt);
 void expire_cw_for_pmt(int master_pmt, int parity, int64_t min_expiry);
-int CAPMT_add_PMT(uint8_t *capmt, int len, SPMT *pmt, int cmd_id);
 int pmt_add(int i, int adapter, int sid, int pmt_pid);
 int test_decrypt_packet(SCW *cw, SPMT_batch *start, int len);
 void init_algo();
 void update_cw(SPMT *pmt);
 int pmt_decrypt_stream(adapter *ad);
 int wait_pusi(adapter *ad, int len);
-int pmt_add_ca_descriptor(SPMT *pmt, uint8_t *buf);
+int pmt_add_ca_descriptor(SPMT *pmt, uint8_t *buf, int sca_id);
 void free_filters();
 void stop_pmt(SPMT *pmt, adapter *ad);
 #endif

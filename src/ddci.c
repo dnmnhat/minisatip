@@ -280,7 +280,7 @@ int create_channel_for_pmt(Sddci_channel *c, SPMT *pmt) {
                         ca[dvbca_id].ad_info[i].mask[j], pmt->id);
                     c->ddci[c->ddcis++].ddci = i;
                     c->sid = pmt->sid;
-                    strncpy(c->name, pmt->name, sizeof(c->name) - 1);
+                    safe_strncpy(c->name, pmt->name);
                 }
         }
     return 0;
@@ -349,7 +349,7 @@ int ddci_process_pmt(adapter *ad, SPMT *pmt) {
                 if (dpmt->sid == pmt->sid) {
                     ddci_mapping_table_t *m = get_ddci_pid(d, pmt->pid);
                     if (m->pid == dpmt->pid) {
-                        strcpy(pmt->name, dpmt->name);
+                        safe_strncpy(pmt->name, dpmt->name);
                     }
                 }
             }
@@ -426,6 +426,7 @@ int ddci_process_pmt(adapter *ad, SPMT *pmt) {
         LOG("Mapping CAT to PMT %d from transponder %d, DDCI transponder %d",
             pmt->id, ad->transponder_id, d->tid)
         add_pid_mapping_table(ad->id, 1, pmt->id, d, 1);  // add pid 1
+        add_pid_mapping_table(ad->id, 17, pmt->id, d, 1); // add pid 17
         d->cat_processed = 0;
     }
 
@@ -660,7 +661,7 @@ int safe_get_pid_mapping(ddci_device_t *d, int aid, int pid) {
 }
 
 int ddci_create_pmt(ddci_device_t *d, SPMT *pmt, uint8_t *new_pmt, int pmt_size,
-                    int ver, int pcr_pid) {
+                    ddci_pmt_t *dp) {
     int pid = pmt->pid, pi_len = 0, i;
     uint8_t *b = new_pmt, *start_pmt, *start_pi_len;
     memset(new_pmt, 0, pmt_size);
@@ -672,11 +673,11 @@ int ddci_create_pmt(ddci_device_t *d, SPMT *pmt, uint8_t *new_pmt, int pmt_size,
     start_pmt = b;
     copy16(b, 0, pmt->sid);
     b += 2;
-    *b++ = (ver << 1) | 0x01;
-    *b++ = 0;                              // section number
-    *b++ = 0;                              // last section number
-    *b++ = 0xE0 | ((pcr_pid >> 8) & 0xFF); // PCR PID
-    *b++ = pcr_pid & 0xFF;                 // PCR PID
+    *b++ = (dp->ver << 1) | 0x01;
+    *b++ = 0;                                  // section number
+    *b++ = 0;                                  // last section number
+    *b++ = 0xE0 | ((dp->pcr_pid >> 8) & 0xFF); // PCR PID
+    *b++ = dp->pcr_pid & 0xFF;                 // PCR PID
 
     start_pi_len = b;
 
@@ -684,8 +685,8 @@ int ddci_create_pmt(ddci_device_t *d, SPMT *pmt, uint8_t *new_pmt, int pmt_size,
     *b++ = 0;
 
     LOGM("%s: PMT %d AD %d, pid: %04X (%d), ver %d, sid %04X (%d) %s %s",
-         __FUNCTION__, pmt->id, pmt->adapter, pid, pid, ver, pmt->sid, pmt->sid,
-         pmt->name[0] ? "channel:" : "", pmt->name);
+         __FUNCTION__, pmt->id, pmt->adapter, pid, pid, dp->ver, pmt->sid,
+         pmt->sid, pmt->name[0] ? "channel:" : "", pmt->name);
 
     // Add CA IDs and CA Pids
     for (i = 0; i < pmt->caids; i++) {
@@ -705,6 +706,28 @@ int ddci_create_pmt(ddci_device_t *d, SPMT *pmt, uint8_t *new_pmt, int pmt_size,
     // Add Stream pids
     // Add CA IDs and CA Pids
     for (i = 0; i < pmt->stream_pids; i++) {
+
+        if (get_ca_multiple_pmt(pmt->adapter)) {
+            // Do not map any pids that are not requested by the client
+            SPid *p = find_pid(pmt->adapter, pmt->stream_pid[i].pid);
+            if (!p) {
+                p = find_pid(pmt->adapter, 8192); // all pids are requested
+            }
+            int is_added = 0, j;
+            if (p) {
+                for (j = 0; j < MAX_STREAMS_PER_PID; j++)
+                    if (p->sid[j] >= 0 && p->sid[j] < MAX_STREAMS) {
+                        is_added = 1;
+                        break;
+                    }
+            }
+            if (is_added == 0) {
+                LOGM("%s: adapter %d pid %d not requested by the client",
+                     __FUNCTION__, pmt->adapter, pmt->stream_pid[i].pid);
+                continue;
+            }
+        }
+
         *b = pmt->stream_pid[i].type;
         copy16(b, 1,
                safe_get_pid_mapping(d, pmt->adapter, pmt->stream_pid[i].pid));
@@ -720,6 +743,14 @@ int ddci_create_pmt(ddci_device_t *d, SPMT *pmt, uint8_t *new_pmt, int pmt_size,
     copy16(start_pmt, -2, 4 + b - start_pmt);
 
     uint32_t crc = crc_32(new_pmt + 1, b - new_pmt - 1);
+
+    // Check if PMT has changed because the user may have added or removed pids
+    if (dp->crc != crc) {
+        dp->ver = (dp->ver + 1) & 0xF;
+        start_pmt[2] = (dp->ver << 1) | 0x01;
+        crc = crc_32(new_pmt + 1, b - new_pmt - 1);
+    }
+    dp->crc = crc;
     copy32(b, 0, crc);
     b += 4;
     return b - new_pmt;
@@ -740,8 +771,7 @@ int ddci_add_psi(ddci_device_t *d, uint8_t *dst, int len) {
         SPMT *pmt;
         for (i = 0; i < MAX_CHANNELS_ON_CI; i++) {
             if ((pmt = get_pmt(d->pmt[i].id))) {
-                psi_len = ddci_create_pmt(d, pmt, psi, sizeof(psi),
-                                          d->pmt[i].ver, d->pmt[i].pcr_pid);
+                psi_len = ddci_create_pmt(d, pmt, psi, sizeof(psi), d->pmt + i);
                 ddci_mapping_table_t *m =
                     get_pid_mapping(d, pmt->adapter, pmt->pid);
                 if (m)
@@ -1122,7 +1152,6 @@ int ddci_open_device(adapter *ad) {
     ad->sys[0] = 0;
     ad->adapter_timeout = 0;
     memset(d->pmt, -1, sizeof(d->pmt));
-    d->ncapid = 0;
     d->max_channels = MAX_CHANNELS_ON_CI;
     d->channels = 0;
     d->wo = 0;
@@ -1176,10 +1205,13 @@ int ddci_process_cat(int filter, unsigned char *b, int len, void *opaque) {
             continue;
         caid = b[i + 2] * 256 + b[i + 3];
         if (id < MAX_CA_PIDS) {
-            d->capid[id++] = (b[i + 4] & 0x1F) * 256 + b[i + 5];
+            d->capid[id] = (b[i + 4] & 0x1F) * 256 + b[i + 5];
+        } else {
+            LOG("MAX_CA_PIDS (%d) reached for adapter %d", MAX_CA_PIDS, d->id);
         }
 
-        LOG("CAT pos %d caid %04X, pid %d", id, caid, d->capid[id - 1]);
+        LOG("CAT pos %d caid %04X, pid %d", id, caid, d->capid[id]);
+        id++;
     }
 
     add_cat = 1;
@@ -1201,7 +1233,6 @@ int ddci_process_cat(int filter, unsigned char *b, int len, void *opaque) {
         add_pid_mapping_table(f->adapter, d->capid[i], d->pmt[0].id, d, 1);
     }
     d->cat_processed = 1;
-    d->ncapid = id;
     mutex_unlock(&d->mutex);
     update_pids(f->adapter);
     update_pids(d->id);
@@ -1289,8 +1320,8 @@ void load_channels(SHashTable *ch) {
 
 void disable_cat_adapters(char *o) {
     int i, la, st, end, j;
-    char buf[1000], *arg[40], *sep;
-    SAFE_STRCPY(buf, o);
+    char buf[strlen(o) + 1], *arg[40], *sep;
+    safe_strncpy(buf, o);
 
     la = split(arg, buf, ARRAY_SIZE(arg), ',');
     for (i = 0; i < la; i++) {

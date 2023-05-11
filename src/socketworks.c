@@ -404,7 +404,7 @@ int connect_local_socket(char *file, int blocking) {
     }
     memset(&serv, 0, sizeof(serv));
     serv.sun_family = AF_LOCAL;
-    strncpy(serv.sun_path, file, sizeof(serv.sun_path) - 1);
+    safe_strncpy(serv.sun_path, file);
 
     set_linux_socket_timeout(sock);
 
@@ -666,7 +666,7 @@ int sockets_del(int sock) {
 int run_loop = 1;
 extern pthread_t main_tid;
 extern int bwnotify;
-extern int64_t bwtt, bw;
+extern int64_t bwtt, bw, buffered_bytes, dropped_bytes;
 extern uint32_t writes, failed_writes;
 
 // remove __thread if your platform does not support threads.
@@ -688,7 +688,7 @@ void *select_and_execute(void *arg) {
 
     memset(thread_name, 0, sizeof(thread_name));
     if (arg) {
-        strncpy(thread_name, (char *)arg, sizeof(thread_name) - 1);
+        safe_strncpy(thread_name, (char *)arg);
     } else
         strcpy(thread_name, "main");
 
@@ -755,15 +755,10 @@ void *select_and_execute(void *arg) {
                     sockets_lock(ss);
 
                     if ((pf[i].revents & POLLOUT) && (ss->spos != ss->wpos)) {
-                        int k = 300;
                         LOGM(
                             "start flush sock id %d, send pos %d, write pos %d",
                             ss->id, ss->spos, ss->wpos);
-                        while (!flush_socket(ss))
-                            if (!k--)
-                                break;
-                        if (k == 0)
-                            DEBUGM("Sock %d: Dequeued max packets", ss->id);
+                        flush_socket(ss);
 
                         if ((pf[i].revents & (~POLLOUT)) == 0) {
                             DEBUGM("Sock %d: No Read event, continuing",
@@ -808,6 +803,10 @@ void *select_and_execute(void *arg) {
                     if (ss->read)
                         read_ok = ss->read(ss->sock, pos, pos_len, ss, &rlen);
 
+                    err = 0;
+                    if (!read_ok)
+                        err = errno;
+
                     if (opts.log & LOG_SOCKET) {
                         int64_t now = getTick();
                         if (now - c_time > 100)
@@ -815,10 +814,6 @@ void *select_and_execute(void *arg) {
                                  "took %jd ms",
                                  ss->id, ss->sock, now - c_time);
                     }
-
-                    err = 0;
-                    if (!read_ok)
-                        err = errno;
 
                     if (rlen > 0)
                         master->rtime = c_time;
@@ -882,7 +877,8 @@ void *select_and_execute(void *arg) {
                             get_sockaddr_host(ss->sa, ra, sizeof(ra)),
                             get_sockaddr_port(ss->sa), types[ss->type & 0x7],
                             ss->type, err);
-                        if (err == EOVERFLOW || err == EWOULDBLOCK)
+                        if (err == EOVERFLOW || err == EWOULDBLOCK ||
+                            err == EINTR)
                             continue;
                         if (err == EAGAIN) {
                             ss->err++;
@@ -981,7 +977,7 @@ int get_mac_address(char *mac) {
 
     if (opts.mac[0]) {
         // simulate mac address
-        strncpy(mac, opts.mac, 13);
+        _strncpy(mac, opts.mac, 13);
         return 0;
     }
     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
@@ -1024,7 +1020,7 @@ int get_mac_address(char *mac) {
 
     if (opts.mac[0]) {
         // simulate mac address
-        strncpy(mac, opts.mac, 13);
+        _strncpy(mac, opts.mac, 13);
         return 0;
     }
     memset(mac, 0, 3 * 6);
@@ -1313,7 +1309,8 @@ int my_writev(sockets *s, struct iovec *iov, int iiov) {
     if (rv < 0 && (errno == ECONNREFUSED ||
                    errno == EPIPE)) // close the stream int the next second
     {
-        LOG("Connection REFUSED on handle %d, socket %d (sid %d), closing the "
+        LOG("Connection REFUSED on handle %d, socket %d (sid %d), closing "
+            "the "
             "socket, remote %s:%d",
             s->sock, s->id, s->sid, get_sockaddr_host(s->sa, ra, sizeof(ra)),
             get_sockaddr_port(s->sa));
@@ -1392,6 +1389,7 @@ int sockets_writev_prio(int sock_id, struct iovec *iov, int iovcnt,
             tmpbuf = malloc1(len);
             if (!tmpbuf) {
                 s->overflow += len - rv;
+                dropped_bytes += len - rv;
                 LOG_AND_RETURN(0, "%s: Could not allocate %d bytes for tmpbuf",
                                __FUNCTION__, len);
             }
@@ -1419,18 +1417,18 @@ int sockets_writev_prio(int sock_id, struct iovec *iov, int iovcnt,
         }
     }
 
-    // high priority packets will be queued in high_prio and flushed after the
-    // current packet example http_response, to avoid waiting all other rtsp
-    // data to be dequeued first
+    // high priority packets will be queued in high_prio and flushed after
+    // the current packet example http_response, to avoid waiting all other
+    // rtsp data to be dequeued first
     if (high_prio && !s->flush_enqued_data && s->spos != s->wpos) {
         int rv = socket_enque_highprio(s, iov, iovcnt);
         if (tmpbuf)
             free(tmpbuf);
         return rv;
     }
-    // if we need the user tuned to a new freq, drop all the data that is in the
-    // buffer if both high_prio and flush_enqued_data are both set, no need to
-    // add to pio_pack
+    // if we need the user tuned to a new freq, drop all the data that is in
+    // the buffer if both high_prio and flush_enqued_data are both set, no
+    // need to add to pio_pack
     if (s->flush_enqued_data) {
         LOG("sock %d dropping enqueued stream data from %d to %d", s->id,
             (s->spos + 1) % s->wmax, s->wpos);
@@ -1451,14 +1449,16 @@ int sockets_writev_prio(int sock_id, struct iovec *iov, int iovcnt,
     } else if (i < 0) {
         LOG("overflow p is %p, buf %p", p, p ? p->buf : NULL);
         s->overflow += len;
+        dropped_bytes += len;
         if (tmpbuf)
             free(tmpbuf);
         return 0;
     }
 
     s->buf_used++;
-    LOGL((s->buf_used % 100 == 0) ? DEFAULT_LOG : 1,
-         "SOCK %d it %d: queueing %d bytes at %d (out of %d) send pos %d [A:%d, "
+    LOGL(((s->buf_used % 1000) == 0) ? 1 : DEFAULT_LOG,
+         "SOCK %d it %d: queueing %d bytes at %d (out of %d) send pos %d "
+         "[A:%d, "
          "U:%d]",
          s->id, s->iteration, len, s->wpos, s->wmax, s->spos, s->buf_alloc,
          s->buf_used);
@@ -1467,11 +1467,12 @@ int sockets_writev_prio(int sock_id, struct iovec *iov, int iovcnt,
         ((s->wpos + 1) % s->wmax)) // the queue is full, start overwriting
     {
         s->overflow += len;
+        dropped_bytes += len;
         s->overflow_packets++;
         if ((s->overflow_packets < 100) || ((s->overflow_packets % 100) == 0) ||
             (opts.log & DEFAULT_LOG))
-            LOG("Insufficient bandwidth: sock %d: overflow %d bytes it %d", s->id, s->overflow,
-                s->iteration);
+            LOG("Insufficient bandwidth: sock %d: overflow %.1f MB", s->id,
+                s->overflow / 1048576.0);
 
         if (tmpbuf)
             free(tmpbuf);
@@ -1484,7 +1485,7 @@ int sockets_writev_prio(int sock_id, struct iovec *iov, int iovcnt,
         pos += iov[i].iov_len;
     }
     p->len = pos;
-    s->buffered_bytes += pos;
+    buffered_bytes += pos;
     s->wpos = (s->wpos + 1) % s->wmax;
 
     if (tmpbuf)
@@ -1500,8 +1501,9 @@ int sockets_write(int sock_id, void *buf, int len) {
     return sockets_writev(sock_id, iov, 1);
 }
 
-int flush_socket(sockets *s) {
+int flush_socket_one_packet(sockets *s) {
     struct iovec iov[2];
+    uint64_t ctime = getTick();
     int r = 1, rv = 0;
     SNPacket *p = NULL;
 
@@ -1517,31 +1519,30 @@ int flush_socket(sockets *s) {
         iov[0].iov_base = p->buf;
         rv = my_writev(s, iov, 1);
         if ((rv > 0) && (rv != p->len)) {
-            LOG("incomplete write, buffered %d packets, wrote %d, bytes left "
+            LOG("incomplete write, buffered %d packets, wrote %d, bytes "
+                "left "
                 "%d",
                 (s->wpos - s->spos + s->wmax) % s->wmax, rv, p->len - rv);
             memmove(p->buf, p->buf + rv, p->len - rv);
             p->len -= rv;
-            s->buffered_bytes -= rv;
             return 1;
         } else {
             if (rv != p->len)
                 return 1;
         }
     }
-    LOGM("SOCK %d: flushed %d out of %d (%d bytes)", s->id, s->spos, s->wpos,
-         p ? p->len : -1);
+    LOG("SOCK %d: flushed %d out of %d (%d bytes) in %jd ms", s->id, s->spos,
+        s->wpos, p ? p->len : -1, getTick() - ctime);
     if (!s->prio_pack.len) {
         s->spos = (s->spos + 1) % s->wmax;
-        s->buffered_bytes -= p->len;
-    }
-    else { // makes sure http response (prio_pack) is sent next
+    } else { // makes sure http response (prio_pack) is sent next
         SNPacket tmp;
         memcpy(&tmp, p, sizeof(tmp));
         memcpy(p, &s->prio_pack, sizeof(tmp));
         memcpy(&s->prio_pack, &tmp, sizeof(tmp));
         s->prio_pack.len = 0;
-        LOG("SOCK %d moved priority packet in the queue at pos %d instead of "
+        LOG("SOCK %d moved priority packet in the queue at pos %d instead "
+            "of "
             "%d",
             s->id, s->spos, s->wpos);
     }
@@ -1552,6 +1553,61 @@ end:
         s->timeout_ms = 1;
     }
     return r;
+}
+
+int flush_socket_all(sockets *s) {
+    struct iovec iov[s->wmax + 1];
+    int spos, i = 0, rv = 0, np = 0, init_rv, len = 0;
+    uint64_t ctime = getTick();
+
+    if (s->spos == s->wpos)
+        return 0;
+
+    memset(&iov, 0, sizeof(iov));
+    spos = s->spos;
+    while (spos != s->wpos) {
+        if (!s->pack[spos].buf) {
+            spos = (spos + 1) % s->wmax;
+            continue;
+        }
+        iov[i].iov_base = s->pack[spos].buf;
+        iov[i++].iov_len = s->pack[spos].len;
+        len += s->pack[spos].len;
+        spos = (spos + 1) % s->wmax;
+    }
+    if (i > 0)
+        init_rv = rv = my_writev(s, iov, i);
+    else {
+        s->spos = (s->spos + 1) % s->wmax;
+        return rv;
+    }
+
+    if (rv <= 0)
+        return rv;
+
+    while (s->spos != s->wpos) {
+        if (rv < s->pack[s->spos].len)
+            break;
+        rv -= s->pack[s->spos].len;
+        s->spos = (s->spos + 1) % s->wmax;
+        np++;
+    }
+    LOGM("SOCK %d: flushed %d (out of %d) bytes in %d packets (left %d) in %jd "
+         "ms",
+         s->id, init_rv, len, np, i - np, getTick() - ctime);
+    if (rv == 0 || s->spos == s->wpos)
+        return 0;
+    SNPacket *p = s->pack + s->spos;
+    memmove(p->buf, p->buf + rv, p->len - rv);
+    p->len -= rv;
+
+    return 0;
+}
+
+int flush_socket(sockets *s) {
+    if (s->force_close || s->prio_pack.len)
+        return flush_socket_one_packet(s);
+    return flush_socket_all(s);
 }
 
 void set_sockets_sid(int id, int sid) {
@@ -1609,13 +1665,4 @@ void sockets_set_master(int slave, int master) {
     s->tid = m->tid;
     s->master = master;
     LOG("sock %d is master for sock %d", s->master, s->id);
-}
-
-int64_t get_sock_buffered_bytes() {
-    uint64_t r = 0;
-    int i;
-    for (i = 0; i < MAX_SOCKS; i++)
-        if (s[i] && s[i]->enabled)
-            r += s[i]->buffered_bytes;
-    return r;
 }

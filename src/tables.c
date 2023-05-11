@@ -20,7 +20,6 @@
 
 #include "tables.h"
 #include "adapter.h"
-#include "ca.h"
 #include "dvb.h"
 #include "dvbapi.h"
 #include "minisatip.h"
@@ -45,6 +44,10 @@
 
 #ifndef DISABLE_DDCI
 #include "ddci.h"
+#endif
+
+#ifndef DISABLE_DVBCA
+#include "ca.h"
 #endif
 
 #define DEFAULT_LOG LOG_TABLES
@@ -177,6 +180,20 @@ int match_caid(SPMT *pmt, int caid, int mask) {
                  __FUNCTION__, pmt->ca[i].id, i, pmt->caids, caid, mask);
             return 1;
         }
+    return 0;
+}
+
+// return 1 if CA can handle this specific CAID on the specified adapter
+int match_ca_caid(int ica, int aid, int caid) {
+    int i;
+    // no CAID added - it means it can handle all CAIDs
+    if (ca[ica].ad_info[aid].caids == 0)
+        return 1;
+    for (i = 0; i < ca[ica].ad_info[aid].caids; i++) {
+        if (ca[ica].ad_info[aid].caid[i] ==
+            (caid & ca[ica].ad_info[aid].mask[i]))
+            return 1;
+    }
     return 0;
 }
 

@@ -26,18 +26,18 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
-//#include <linux/ioctl.h>
+// #include <linux/ioctl.h>
 #include <sys/ioctl.h>
 
 #include "adapter.h"
+#include "api/symbols.h"
+#include "api/variables.h"
 #include "dvb.h"
 #include "dvbapi.h"
 #include "pmt.h"
 #include "socketworks.h"
 #include "stream.h"
 #include "utils.h"
-#include "api/symbols.h"
-#include "api/variables.h"
 #include "utils/ticks.h"
 
 #ifndef DISABLE_SATIPCLIENT
@@ -108,6 +108,7 @@ adapter *adapter_alloc() {
 
     ad->strength_multiplier = opts.strength_multiplier;
     ad->snr_multiplier = opts.snr_multiplier;
+    ad->force_tuner_signal = TUNER_FORCE_NO;
     ad->db_snr_map = 1.0;
 
     ad->drop_encrypted = opts.drop_encrypted;
@@ -981,7 +982,8 @@ int tune(int aid, int sid) {
     adapter *ad = get_adapter(aid);
     int rv = 0, flush_data = 0;
 
-    LOGM("adapter tune: sid %d aid %d => sock: %d ", sid, aid, ad ? ad->sock : -1);
+    LOGM("adapter tune: sid %d aid %d => sock: %d ", sid, aid,
+         ad ? ad->sock : -1);
 
     if (!ad)
         return -400;
@@ -1089,7 +1091,7 @@ void mark_pid_deleted(int aid, int sid, int _pid, SPid *p) {
     if (sort) {
         for (j = 0; j < MAX_STREAMS_PER_PID - 1; j++)
             if (p->sid[j + 1] > p->sid[j]) {
-                unsigned char t = p->sid[j];
+                int16_t t = p->sid[j];
                 p->sid[j] = p->sid[j + 1];
                 p->sid[j + 1] = t;
             }
@@ -1217,7 +1219,7 @@ int compare_tunning_parameters(int aid, transponder *tp) {
         get_absolute_source_for_adapter(aid, tp->diseqc, tp->sys) !=
             ad->tp.diseqc ||
         (tp->pol > 0 && tp->pol != ad->tp.pol) ||
-        (tp->sr > 1000 && tp->sr != ad->tp.sr) ||
+        (tp->sr > 1000 && ad->tp.sr > 1000 && tp->sr != ad->tp.sr) ||
         (tp->mtype != 6 && ad->tp.mtype != 6 && tp->mtype != ad->tp.mtype))
 
         return 1;
@@ -1468,10 +1470,10 @@ void set_disable(int i, int v) {
 
 void enable_adapters(char *o) {
     int i, la, st, end, j;
-    char buf[1000], *arg[40], *sep;
+    char buf[strlen(o) + 1], *arg[40], *sep;
     for (i = 0; i < MAX_ADAPTERS; i++)
         set_disable(i, 1);
-    SAFE_STRCPY(buf, o);
+    safe_strncpy(buf, o);
 
     la = split(arg, buf, ARRAY_SIZE(arg), ',');
     for (i = 0; i < la; i++) {
@@ -1490,9 +1492,9 @@ void enable_adapters(char *o) {
 
 void set_unicable_adapters(char *o, int type) {
     int i, la, a_id, slot, freq, pin, o13v;
-    char buf[1000], *arg[40], *sep1, *sep2, *sep3;
+    char buf[strlen(o) + 1], *arg[40], *sep1, *sep2, *sep3;
     adapter *ad;
-    SAFE_STRCPY(buf, o);
+    safe_strncpy(buf, o);
     la = split(arg, buf, ARRAY_SIZE(arg), ',');
     for (i = 0; i < la; i++) {
         a_id = map_intd(arg[i], NULL, -1);
@@ -1532,9 +1534,9 @@ void set_unicable_adapters(char *o, int type) {
 
 void set_diseqc_adapters(char *o) {
     int i, la, a_id, fast, addr, committed_no, uncommitted_no;
-    char buf[1000], *arg[40], *sep1, *sep2;
+    char buf[strlen(o) + 1], *arg[40], *sep1, *sep2;
     adapter *ad;
-    SAFE_STRCPY(buf, o);
+    safe_strncpy(buf, o);
     la = split(arg, buf, ARRAY_SIZE(arg), ',');
     for (i = 0; i < la; i++) {
         if (arg[i] && arg[i][0] == '*') {
@@ -1603,10 +1605,10 @@ void set_diseqc_adapters(char *o) {
 
 void set_absolute_src(char *o) {
     int i, la, src, inp, pos, range;
-    char buf[1000], *arg[40], *inps, *poss, *ranges;
+    char buf[strlen(o) + 1], *arg[40], *inps, *poss, *ranges;
     adapter *ad;
 
-    strncpy(buf, o, sizeof(buf) - 1);
+    safe_strncpy(buf, o);
     buf[sizeof(buf) - 1] = '\0';
     la = split(arg, buf, ARRAY_SIZE(arg), ',');
     for (i = 0; i < la; i++) {
@@ -1653,9 +1655,9 @@ void set_absolute_src(char *o) {
 
 void set_diseqc_multi(char *o) {
     int i, la, a_id, position;
-    char buf[1000], *arg[40], *sep1;
+    char buf[strlen(o) + 1], *arg[40], *sep1;
     adapter *ad;
-    SAFE_STRCPY(buf, o);
+    safe_strncpy(buf, o);
     la = split(arg, buf, ARRAY_SIZE(arg), ',');
     for (i = 0; i < la; i++) {
         if (arg[i] && arg[i][0] == '*') {
@@ -1694,9 +1696,9 @@ void set_diseqc_multi(char *o) {
 
 void set_lnb_adapters(char *o) {
     int i, la, a_id, lnb_low, lnb_high, lnb_switch;
-    char buf[1000], *arg[40], *sep1, *sep2, *sep3;
+    char buf[strlen(o) + 1], *arg[40], *sep1, *sep2, *sep3;
     adapter *ad;
-    SAFE_STRCPY(buf, o);
+    safe_strncpy(buf, o);
     la = split(arg, buf, ARRAY_SIZE(arg), ',');
     for (i = 0; i < la; i++) {
         if (arg[i] && arg[i][0] == '*') {
@@ -1756,10 +1758,10 @@ void set_diseqc_timing(char *o) {
     int i, la, a_id;
     int before_cmd, after_cmd, after_repeated_cmd;
     int after_switch, after_burst, after_tone;
-    char buf[2000], *arg[40];
+    char buf[strlen(o) + 1], *arg[40];
     char *sep1, *sep2, *sep3, *sep4, *sep5, *sep6;
     adapter *ad;
-    SAFE_STRCPY(buf, o);
+    safe_strncpy(buf, o);
     la = split(arg, buf, ARRAY_SIZE(arg), ',');
     for (i = 0; i < la; i++) {
         if (arg[i] && arg[i][0] == '*') {
@@ -1829,9 +1831,9 @@ void set_diseqc_timing(char *o) {
 
 void set_slave_adapters(char *o) {
     int i, j, la, a_id, a_id2, master = 0;
-    char buf[1000], *arg[40], *sep, *sep2;
+    char buf[strlen(o) + 1], *arg[40], *sep, *sep2;
     adapter *ad;
-    SAFE_STRCPY(buf, o);
+    safe_strncpy(buf, o);
     la = split(arg, buf, ARRAY_SIZE(arg), ',');
     for (i = 0; i < la; i++) {
         a_id = map_intd(arg[i], NULL, -1);
@@ -1879,9 +1881,9 @@ void set_slave_adapters(char *o) {
 void set_timeout_adapters(char *o) {
     int i, j, la, a_id, a_id2;
     int timeout = opts.adapter_timeout / 1000;
-    char buf[1000], *arg[40], *sep;
+    char buf[strlen(o) + 1], *arg[40], *sep;
     adapter *ad;
-    SAFE_STRCPY(buf, o);
+    safe_strncpy(buf, o);
     sep = strchr(buf, ':');
     if (sep)
         timeout = map_intd(sep + 1, NULL, timeout);
@@ -1924,9 +1926,9 @@ void set_timeout_adapters(char *o) {
 extern char *fe_delsys[];
 void set_adapters_delsys(char *o) {
     int i, la, a_id, ds;
-    char buf[1000], *arg[40], *sep;
+    char buf[strlen(o) + 1], *arg[40], *sep;
     adapter *ad;
-    SAFE_STRCPY(buf, o);
+    safe_strncpy(buf, o);
     la = split(arg, buf, ARRAY_SIZE(arg), ',');
     for (i = 0; i < la; i++) {
         a_id = map_intd(arg[i], NULL, -1);
@@ -1962,9 +1964,11 @@ void set_adapters_delsys(char *o) {
 void set_signal_multiplier(char *o) {
     int i, la, a_id;
     float strength_multiplier, snr_multiplier;
-    char buf[1000], *arg[40], *sep1, *sep2;
+    char force_tuner_signal = TUNER_FORCE_NO;
+    char force_str[128];
+    char buf[strlen(o) + 1], *arg[40], *sep1, *sep2;
     adapter *ad;
-    SAFE_STRCPY(buf, o);
+    safe_strncpy(buf, o);
     la = split(arg, buf, ARRAY_SIZE(arg), ',');
     for (i = 0; i < la; i++) {
         if (arg[i] && arg[i][0] == '*') {
@@ -1986,14 +1990,27 @@ void set_signal_multiplier(char *o) {
         if (!sep1 || !sep2)
             continue;
 
-        strength_multiplier = strtod(sep1 + 1, NULL);
-        snr_multiplier = strtod(sep2 + 1, NULL);
+        if (sep1[1] == '%' || sep1[1] == '#') {
+            force_tuner_signal |= sep1[1] == '%' ? TUNER_FORCE_STRENGTH_PERCENT
+                                                 : TUNER_FORCE_STRENGTH_DECIBEL;
+            strength_multiplier = strtod(sep1 + 2, NULL);
+        } else {
+            strength_multiplier = strtod(sep1 + 1, NULL);
+        }
+        if (sep2[1] == '%' || sep2[1] == '#') {
+            force_tuner_signal |= sep2[1] == '%' ? TUNER_FORCE_SNR_PERCENT
+                                                 : TUNER_FORCE_SNR_DECIBEL;
+            snr_multiplier = strtod(sep2 + 2, NULL);
+        } else {
+            snr_multiplier = strtod(sep2 + 1, NULL);
+        }
         if (strength_multiplier < 0 || snr_multiplier < 0)
             continue;
 
         if (ad) {
             ad->strength_multiplier = strength_multiplier;
             ad->snr_multiplier = snr_multiplier;
+            ad->force_tuner_signal = force_tuner_signal;
         } else {
             opts.strength_multiplier = strength_multiplier;
             opts.snr_multiplier = snr_multiplier;
@@ -2004,9 +2021,27 @@ void set_signal_multiplier(char *o) {
                     a[j]->snr_multiplier = snr_multiplier;
                 }
         }
-        LOG("Setting signal multipler for adapter %d strength_multiplier %.2f "
+        if (force_tuner_signal) {
+            sprintf(force_str, " (forcing driver:%s%s%s%s)",
+                    (force_tuner_signal & TUNER_FORCE_STRENGTH_PERCENT) > 0
+                        ? " strength_in_percentage"
+                        : "",
+                    (force_tuner_signal & TUNER_FORCE_STRENGTH_DECIBEL) > 0
+                        ? " strength_in_decibels"
+                        : "",
+                    (force_tuner_signal & TUNER_FORCE_SNR_PERCENT) > 0
+                        ? " snr_in_percentage"
+                        : "",
+                    (force_tuner_signal & TUNER_FORCE_SNR_DECIBEL) > 0
+                        ? " snr_in_decibels"
+                        : "");
+        } else
+            force_str[0] = '\0';
+        LOG("Setting signal multipler for adapter %d%s "
+            "strength_multiplier %.2f "
             "snr_multiplier %.2f",
-            a_id, (double)strength_multiplier, (double)snr_multiplier);
+            a_id, force_str, (double)strength_multiplier,
+            (double)snr_multiplier);
     }
 }
 

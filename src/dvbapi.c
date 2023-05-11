@@ -20,14 +20,14 @@
 
 #include "dvbapi.h"
 #include "adapter.h"
+#include "api/symbols.h"
+#include "api/variables.h"
 #include "dvb.h"
 #include "minisatip.h"
 #include "pmt.h"
 #include "socketworks.h"
 #include "tables.h"
 #include "utils.h"
-#include "api/symbols.h"
-#include "api/variables.h"
 #include "utils/ticks.h"
 
 #include <arpa/inet.h>
@@ -318,7 +318,7 @@ int dvbapi_reply(sockets *s) {
                     k_id, parity, index, correct ? "OK" : "NOK", cw[0], cw[1],
                     cw[2], cw[3], cw[4], cw[5], cw[6], cw[7]);
 
-                send_cw(k->pmt_id, k->algo, parity, cw, NULL, 0);
+                send_cw(k->pmt_id, k->algo, parity, cw, NULL, 0, &k->icam_ecm);
 
                 mutex_unlock(&k->mutex);
             } else
@@ -458,7 +458,8 @@ int dvbapi_send_pmt(SKey *k, int cmd_id) {
     copy16(buf, 23, 0x8701); // ca_device_descriptor (caX)
     buf[25] = demux;
 
-    len = 26 + pmt_add_ca_descriptor(pmt, buf + 26); // CA description
+    len =
+        26 + pmt_add_ca_descriptor(pmt, buf + 26, dvbapi_ca); // CA description
 
     // Pids associated with the PMT
     copy16(buf, 10, len - 12);
@@ -642,7 +643,7 @@ int send_ecm(int filter_id, unsigned char *b, int len, void *opaque) {
     if ((getTick() - k->last_ecm > 1000) && !valid_cw)
         k->ecm_parity[i] = -1;
 
-    if ((b[0] == 0x80 || b[0] == 0x81) && (b[0] & 1) == k->ecm_parity[i])
+    if (!opts.send_all_ecm && (b[0] == 0x80 || b[0] == 0x81) && (b[0] & 1) == k->ecm_parity[i])
         return 0;
 
     old_parity = k->ecm_parity[i];
@@ -651,12 +652,14 @@ int send_ecm(int filter_id, unsigned char *b, int len, void *opaque) {
     len = ((b[1] & 0xF) << 8) + b[2];
     len += 3;
     k->last_ecm = getTick();
-    LOG("dvbapi: sending ECM key %d for pid %04X (%d), current ecm_parity = "
-        "%d, "
-        "previous parity %d, demux = %d, filter = %d, len = %d [%02X %02X %02X "
+    if (b[2] - b[4] == 4)
+        k->icam_ecm = b[0x15];
+    LOG("dvbapi: sending ECM key %d for pid %04X (%d), ecm_parity = %d, "
+        "previous parity %d, demux = %d, filter = %d, icam_ecm %d, len = %d "
+        "[%02X %02X %02X "
         "%02X]",
-        k->id, pid, pid, k->ecm_parity[i], old_parity, demux, filter, len, b[0],
-        b[1], b[2], b[3]);
+        k->id, pid, pid, k->ecm_parity[i], old_parity, demux, filter,
+        k->icam_ecm, len, b[0], b[1], b[2], b[3]);
 
     if (demux < 0)
         return 0;
@@ -677,7 +680,6 @@ int send_ecm(int filter_id, unsigned char *b, int len, void *opaque) {
 int set_algo(SKey *k, int algo, int mode) {
     if (algo == CA_ALGO_AES128 && mode == CA_MODE_CBC)
         algo = CA_ALGO_AES128_CBC;
-
     k->algo = algo;
 
     return 0;
@@ -724,6 +726,7 @@ int keys_add(int i, int adapter, int pmt_id) {
     k->last_dmx_stop = 0;
     k->onid = 0;
     k->tsid = 0;
+    k->icam_ecm = 0;
     memset(k->cw[0], 0, 16);
     memset(k->cw[1], 0, 16);
     memset(k->filter_id, -1, sizeof(k->filter_id));
@@ -875,7 +878,7 @@ char *get_channel_for_key(int key, char *dest, int max_size) {
     if (k)
         pmt = get_pmt(k->pmt_id);
     if (pmt)
-        strncpy(dest, pmt->name, max_size - 1);
+        _strncpy(dest, pmt->name, max_size - 1);
 
     return dest;
 }

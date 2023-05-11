@@ -37,14 +37,14 @@
 #include <unistd.h>
 
 #include "adapter.h"
+#include "api/symbols.h"
+#include "api/variables.h"
 #include "dvb.h"
 #include "minisatip.h"
+#include "pmt.h"
 #include "socketworks.h"
 #include "stream.h"
 #include "t2mi.h"
-#include "pmt.h"
-#include "api/symbols.h"
-#include "api/variables.h"
 #include "utils/ticks.h"
 
 #define DEFAULT_LOG LOG_STREAM
@@ -103,7 +103,7 @@ char *describe_streams(sockets *s, char *req, char *sbuf, int size) {
 
     if (do_all) {
         for (i = 0; i < MAX_STREAMS; i++)
-            if ((sid2 = get_sid_for(i))) {
+            if ((sid2 = get_sid_nw(i))) {
                 int slen = strlen(sbuf);
                 streams_enabled++;
                 strlcatf(sbuf, size, slen,
@@ -145,25 +145,21 @@ void set_stream_parameters(int s_id, transponder *t) {
     if (!sid || !sid->enabled)
         return;
     if (t->apids && t->apids[0] >= '0' && t->apids[0] <= '9') {
-        strncpy(sid->apids, t->apids, LEN_PIDS);
+        _strncpy(sid->apids, t->apids, LEN_PIDS);
         t->apids = sid->apids;
-        sid->apids[LEN_PIDS] = 0;
     }
     if (t->dpids && t->dpids[0] >= '0' && t->dpids[0] <= '9') {
-        strncpy(sid->dpids, t->dpids, LEN_PIDS);
+        _strncpy(sid->dpids, t->dpids, LEN_PIDS);
         t->dpids = sid->dpids;
-        sid->dpids[LEN_PIDS] = 0;
     }
     if (t->pids && t->pids[0] >= '0' && t->pids[0] <= '9') {
-        strncpy(sid->pids, t->pids, LEN_PIDS);
+        _strncpy(sid->pids, t->pids, LEN_PIDS);
         t->pids = sid->pids;
-        sid->pids[LEN_PIDS] = 0;
     }
 
     if (t->x_pmt && t->x_pmt[0] >= '0' && t->x_pmt[0] <= '9') {
-        strncpy(sid->x_pmt, t->x_pmt, LEN_PIDS);
+        _strncpy(sid->x_pmt, t->x_pmt, LEN_PIDS);
         t->x_pmt = sid->x_pmt;
-        sid->x_pmt[LEN_PIDS] = 0;
     }
 
     if (!t->apids)
@@ -183,7 +179,7 @@ streams *setup_stream(char *str, sockets *s) {
     char tmp_str[2000];
 
     transponder t;
-    strncpy(tmp_str, str, sizeof(tmp_str));
+    safe_strncpy(tmp_str, str);
     tmp_str[sizeof(tmp_str) - 1] = 0;
     detect_dvb_parameters(str, &t);
     LOG("Setup stream sid %d parameters, sock_id %d, handle %d", s->sid, s->id,
@@ -413,7 +409,8 @@ int decode_transport(sockets *s, char *arg, char *default_rtp, int start_rtp) {
             memcpy(&sid->sa, &s->sa, sizeof(s->sa));
             if (!set_linux_socket_nonblock(s->sock))
                 s->nonblock = 1;
-            set_socket_send_buffer(s->sock, opts.output_buffer);
+            if (opts.output_buffer > 0)
+                set_socket_send_buffer(s->sock, opts.output_buffer);
             return 0;
         }
 
@@ -434,14 +431,14 @@ int decode_transport(sockets *s, char *arg, char *default_rtp, int start_rtp) {
         if (strncmp("port=", arg2[l], 5) == 0)
             p.port = atoi(arg2[l] + 5);
         if (strncmp("destination=", arg2[l], 12) == 0)
-            SAFE_STRCPY(p.dest, arg2[l] + 12);
+            safe_strncpy(p.dest, arg2[l] + 12);
     }
     if (default_rtp)
-        SAFE_STRCPY(p.dest, default_rtp);
-    if (p.dest[0] == 0 && p.type == TYPE_UNICAST)
+        safe_strncpy(p.dest, default_rtp);
+    if (!p.dest[0] && p.type == TYPE_UNICAST)
         get_sockaddr_host(s->sa, p.dest, sizeof(p.dest) - 1);
-    if (p.dest[0] == 0)
-        SAFE_STRCPY(p.dest, opts.disc_host);
+    if (!p.dest[0])
+        safe_strncpy(p.dest, opts.disc_host);
     if (p.port == 0)
         p.port = start_rtp;
     LOG("decode_transport ->type %d, ttl %d new socket to: %s:%d", p.type,
@@ -493,7 +490,8 @@ int decode_transport(sockets *s, char *arg, char *default_rtp, int start_rtp) {
                              (socket_action)close_stream_for_socket, NULL)) < 0)
             LOG_AND_RETURN(-1, "RTP sockets_add failed");
 
-        set_socket_send_buffer(sid->rsock, opts.output_buffer);
+        if (opts.output_buffer > 0)
+            set_socket_send_buffer(sid->rsock, opts.output_buffer);
         set_socket_dscp(sid->rsock, IPTOS_DSCP_EF, 7);
 
         if ((sid->rtcp =
@@ -514,7 +512,7 @@ int decode_transport(sockets *s, char *arg, char *default_rtp, int start_rtp) {
             LOG_AND_RETURN(-1, "RTCP sockets_add failed");
 
         for (i = 0; i < MAX_STREAMS; i++)
-            if ((sid2 = get_sid_for(i)) && i != sid->sid &&
+            if ((sid2 = get_sid_nw(i)) && i != sid->sid &&
                 get_sockaddr_port(sid2->sa) == get_sockaddr_port(sid->sa)) {
                 char h1[100], h2[100];
                 get_sockaddr_host(sid->sa, h1, sizeof(h1));
@@ -571,19 +569,18 @@ close_streams_for_adapter(int ad, int except) {
     if (ad < 0)
         return 0;
     for (i = 0; i < MAX_STREAMS; i++)
-        if ((sid = get_sid_for(i)) && sid->adapter == ad)
+        if ((sid = get_sid_nw(i)) && sid->adapter == ad)
             if (except < 0 || except != i)
                 close_stream(i);
     return 0;
 }
 
-int64_t tbw, bw, bwtt, bw_dmx;
+int64_t tbw, bw, bwtt, bw_dmx, buffered_bytes, dropped_bytes;
 uint32_t reads, writes, failed_writes;
 int64_t nsecs;
 
-int64_t c_tbw, c_bw, c_bw_dmx;
+int64_t c_tbw, c_bw, c_bw_dmx, c_buffered, c_tt, c_dropped, c_ns_read;
 uint32_t c_reads, c_writes, c_failed_writes;
-int64_t c_ns_read, c_tt;
 
 uint64_t last_sd;
 
@@ -966,7 +963,6 @@ int process_dmx(sockets *s) {
     int64_t stime;
     int rlen = s->rlen;
     s->rlen = 0;
-    bw_dmx += rlen;
 
     ad = get_adapter(s->sid);
     if (!ad)
@@ -976,6 +972,8 @@ int process_dmx(sockets *s) {
     ad->rtime = s->rtime;
     ad->rlen = rlen;
     stime = getTickUs();
+    if (ad->type != ADAPTER_CI)
+        bw_dmx += rlen;
 
     LOGM("process_dmx start called for adapter %d -> %d out of %d bytes read, "
          "%jd ms ago",
@@ -1118,9 +1116,12 @@ int calculate_bw(sockets *s) {
             c_writes = writes;
             c_failed_writes = failed_writes;
             c_tt = nsecs / 1000;
-            LOG("BW %jd KB/s, DMX %jd KB/s, Buffered %jd MB, Total BW: %jd MB, ns/read %jd, r: %d, w: %d fw: "
-                "%d, tt: %jd ms",
-                c_bw, c_bw_dmx, get_sock_buffered_bytes() / 1048576, c_tbw, c_ns_read, c_reads, c_writes, 
+            c_buffered = buffered_bytes;
+            c_dropped = dropped_bytes;
+            LOG("BW %jd KB/s, DMX %jd KB/s, Buffered %.1f MB, Dropped: %.1f "
+                "MB, ns/read %jd, r: %d, w: %d fw: %d, tt: %jd ms",
+                c_bw, c_bw_dmx, 1.0 * c_buffered / 1048576,
+                1.0 * c_dropped / 1048576, c_ns_read, c_reads, c_writes,
                 c_failed_writes, c_tt);
             mutex_unlock(&bw_mutex);
         }
@@ -1130,6 +1131,8 @@ int calculate_bw(sockets *s) {
         nsecs = 0;
         reads = 0;
         writes = 0;
+        buffered_bytes = 0;
+        dropped_bytes = 0;
     }
     join_thread();
     return 0;
@@ -1145,7 +1148,7 @@ int stream_timeout(sockets *s) {
     ctime = getTick();
     s->rtime = ctime;
 
-    if ((sid = get_sid_for(s->sid)) && sid->type != STREAM_HTTP) {
+    if ((sid = get_sid(s->sid)) && sid->type != STREAM_HTTP) {
         mutex_lock(&sid->mutex);
         rttime = sid->rtcp_wtime, rtime = sid->wtime;
 
@@ -1180,7 +1183,7 @@ void dump_streams() {
         return;
     LOG("Dumping streams:");
     for (i = 0; i < MAX_STREAMS; i++)
-        if ((sid = get_sid_for(i)))
+        if ((sid = get_sid_nw(i)))
             LOG("%d|  a:%d rsock:%d type:%d play:%d remote:%s:%d", i,
                 sid->adapter, sid->rsock, sid->type, sid->do_play,
                 get_stream_rhost(sid->sid, ra, sizeof(ra)),
@@ -1191,9 +1194,9 @@ int lock_streams_for_adapter(int aid) {
     streams *sid;
     int i = 0, ls = 0;
     for (i = 0; i < MAX_STREAMS; i++)
-        if ((sid = get_sid_for(i)) && sid->adapter == aid) {
+        if ((sid = get_sid_nw(i)) && sid->adapter == aid) {
             mutex_lock(&sid->mutex);
-            if ((sid = get_sid_for(i)) && (sid->adapter != aid))
+            if ((sid = get_sid_nw(i)) && (sid->adapter != aid))
                 mutex_unlock(&sid->mutex);
             else
                 ls++;
@@ -1205,7 +1208,7 @@ int unlock_streams_for_adapter(int aid) {
     streams *sid;
     int i = 0, ls = 0;
     for (i = MAX_STREAMS - 1; i >= 0; i--)
-        if ((sid = get_sid_for(i)) && sid->adapter == aid) {
+        if ((sid = get_sid_nw(i)) && sid->adapter == aid) {
             mutex_unlock(&sid->mutex);
             ls++;
         }
@@ -1250,7 +1253,7 @@ int fix_master_sid(int a_id) {
     if (ad->sid_cnt < 1)
         return 0;
     for (i = 0; i < MAX_STREAMS; i++)
-        if ((sid = get_sid_for(i)) && sid->adapter == a_id) {
+        if ((sid = get_sid_nw(i)) && sid->adapter == a_id) {
             LOG("fix master_sid to %d for adapter %d", sid->sid, a_id);
             ad->master_sid = i;
         }
@@ -1261,7 +1264,7 @@ int find_session_id(int id) {
     int i;
     streams *sid;
     for (i = 0; i < MAX_STREAMS; i++)
-        if ((sid = get_sid_for(i)) && sid->ssrc == id) {
+        if ((sid = get_sid_nw(i)) && sid->ssrc == id) {
             sid->rtime = getTick();
             LOG("recovered session id from a closed connection, sid %d , id: "
                 "%d",
@@ -1291,7 +1294,7 @@ int get_streams_for_adapter(int aid) {
     int i, sa = 0;
     streams *sid;
     for (i = 0; i < MAX_STREAMS; i++)
-        if ((sid = get_sid_for(i)) && sid->adapter == aid)
+        if ((sid = get_sid_nw(i)) && sid->adapter == aid)
             sa++;
     return sa;
 }
@@ -1309,6 +1312,25 @@ int get_stream_rport(int s_id) {
     if (!sid)
         return 0;
     return get_sockaddr_port(sid->sa);
+}
+
+char *get_stream_protocol(int s_id, char *dest, int max_size) {
+    int len = 0;
+    streams *s = get_sid_nw(s_id);
+    dest[0] = 0;
+
+    if (!s)
+        return dest;
+
+    if (s->type == STREAM_HTTP)
+        strlcatf(dest, max_size, len, "HTTP");
+    else if (s->type == STREAM_RTSP_UDP)
+        strlcatf(dest, max_size, len, "RTP/UDP");
+    else if (s->type == STREAM_RTSP_TCP)
+        strlcatf(dest, max_size, len, "RTP/TCP");
+    else
+        strlcatf(dest, max_size, len, "unkown");  // RTP/MCAST ?
+    return dest;
 }
 
 char *get_stream_pids(int s_id, char *dest, int max_size) {
@@ -1373,6 +1395,8 @@ _symbols stream_sym[] = {
     {"st_rhost", VAR_FUNCTION_STRING, (void *)&get_stream_rhost, 0, MAX_STREAMS,
      0},
     {"st_rport", VAR_FUNCTION_INT, (void *)&get_stream_rport, 0, MAX_STREAMS,
+     0},
+    {"st_proto", VAR_FUNCTION_STRING, (void *)&get_stream_protocol, 0, MAX_STREAMS,
      0},
     {"st_pids", VAR_FUNCTION_STRING, (void *)&get_stream_pids, 0, MAX_STREAMS,
      0},

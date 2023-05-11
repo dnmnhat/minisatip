@@ -248,16 +248,22 @@ int get_max_pmt_for_ca(int i) {
     return MAX_CA_PMT;
 }
 
+int get_ca_multiple_pmt(int i) {
+    if (i >= 0 && i < MAX_ADAPTERS && ca_devices[i] && ca_devices[i]->enabled)
+        return ca_devices[i]->multiple_pmt;
+    return 0;
+}
+
 void send_cw_to_all_pmts(ca_device_t *d, int parity) {
     int i;
     for (i = 0; i < d->max_ca_pmt; i++) {
         if (PMT_ID_IS_VALID(d->capmt[i].pmt_id)) {
             send_cw(d->capmt[i].pmt_id, CA_ALGO_AES128_CBC, parity,
-                    d->key[parity], d->iv[parity], 3720);
+                    d->key[parity], d->iv[parity], 3720, NULL);
         }
         if (PMT_ID_IS_VALID(d->capmt[i].other_id)) {
             send_cw(d->capmt[i].other_id, CA_ALGO_AES128_CBC, parity,
-                    d->key[parity], d->iv[parity], 3720);
+                    d->key[parity], d->iv[parity], 3720, NULL);
         }
     }
 }
@@ -274,8 +280,36 @@ void disable_cws_for_all_pmts(ca_device_t *d) {
     }
 }
 
+int CAPMT_add_PMT(uint8_t *capmt, int len, SPMT *pmt, int cmd_id,
+                  int added_only, int ca_id) {
+    int i = 0, pos = 0;
+    for (i = 0; i < pmt->stream_pids; i++) {
+        if (added_only && !find_pid(pmt->adapter, pmt->stream_pid[i].pid)) {
+            LOGM("%s: skipping pmt %d (ad %d) pid %d from CAPMT", __FUNCTION__,
+                 pmt->id, pmt->adapter, pmt->stream_pid[i].pid);
+            continue;
+        }
+        if (!pmt->stream_pid[i].is_audio && !pmt->stream_pid[i].is_video)
+            continue;
+        capmt[pos++] = pmt->stream_pid[i].type;
+        copy16(capmt, pos, pmt->stream_pid[i].pid);
+        pos += 2;
+        int pi_len_pos = pos, pi_len = 0;
+        pos += 2;
+
+        // append the stream descriptors
+        if (pmt->caids) {
+            capmt[pos++] = cmd_id;
+            pi_len = pmt_add_ca_descriptor(pmt, capmt + pos, ca_id);
+            pos += pi_len;
+        }
+        copy16(capmt, pi_len_pos, pi_len + 1);
+    }
+    return pos;
+}
+
 int create_capmt(SCAPMT *ca, int listmgmt, uint8_t *capmt, int capmt_len,
-                 int cmd_id) {
+                 int cmd_id, int added_only) {
     int pos = 0;
     SPMT *pmt = get_pmt(ca->pmt_id);
     SPMT *other = get_pmt(ca->other_id);
@@ -291,9 +325,11 @@ int create_capmt(SCAPMT *ca, int listmgmt, uint8_t *capmt, int capmt_len,
     capmt[pos++] = 0; // PI LEN 2 bytes, set 0
     capmt[pos++] = 0;
 
-    pos += CAPMT_add_PMT(capmt + pos, capmt_len - pos, pmt, cmd_id);
+    pos += CAPMT_add_PMT(capmt + pos, capmt_len - pos, pmt, cmd_id, added_only,
+                         dvbca_id);
     if (other) {
-        pos += CAPMT_add_PMT(capmt + pos, capmt_len - pos, other, cmd_id);
+        pos += CAPMT_add_PMT(capmt + pos, capmt_len - pos, other, cmd_id,
+                             added_only, dvbca_id);
     }
 
     return pos;
@@ -305,7 +341,8 @@ int send_capmt(ca_device_t *d, SCAPMT *ca, int listmgmt, int reason) {
     uint8_t capmt[8192];
     memset(capmt, 0, sizeof(capmt));
 
-    int size = create_capmt(ca, listmgmt, capmt, sizeof(capmt), reason);
+    int size = create_capmt(ca, listmgmt, capmt, sizeof(capmt), reason,
+                            d->multiple_pmt);
     hexdump("CAPMT: ", capmt, size);
 
     if (size <= 0)
@@ -334,6 +371,7 @@ SCAPMT *add_pmt_to_capmt(ca_device_t *d, SPMT *pmt, int multiple) {
     int ca_pos;
     SCAPMT *res = NULL;
 
+    // check if the PMT is already added (happening on PMT update)
     for (ca_pos = 0; ca_pos < d->max_ca_pmt; ca_pos++) {
         if (d->capmt[ca_pos].pmt_id == pmt->id ||
             d->capmt[ca_pos].other_id == pmt->id) {
@@ -341,6 +379,7 @@ SCAPMT *add_pmt_to_capmt(ca_device_t *d, SPMT *pmt, int multiple) {
             break;
         }
     }
+    // add the pmt to the CI
     if (!res) {
         for (ca_pos = 0; ca_pos < d->max_ca_pmt; ca_pos++) {
             if (d->capmt[ca_pos].pmt_id == -1) {
@@ -522,10 +561,11 @@ int dvbca_process_pmt(adapter *ad, SPMT *spmt) {
         LOG_AND_RETURN(TABLES_RESULT_ERROR_NORETRY, "send_capmt failed");
 
     if (d->key[0][0])
-        send_cw(spmt->id, CA_ALGO_AES128_CBC, 0, d->key[0], d->iv[0],
-                3600); // 1 hour
+        send_cw(spmt->id, CA_ALGO_AES128_CBC, 0, d->key[0], d->iv[0], 3600,
+                NULL); // 1 hour
     if (d->key[1][0])
-        send_cw(spmt->id, CA_ALGO_AES128_CBC, 1, d->key[1], d->iv[1], 3600);
+        send_cw(spmt->id, CA_ALGO_AES128_CBC, 1, d->key[1], d->iv[1], 3600,
+                NULL);
 
     return 0;
 }
@@ -775,7 +815,7 @@ void get_authdata_filename(char *dest, size_t len, unsigned int slot,
     char cin[128];
     /* add module name to slot authorization bin file */
     memset(cin, 0, sizeof(cin));
-    strncpy(cin, ci_name, sizeof(cin) - 1);
+    safe_strncpy(cin, ci_name);
     /* quickly replace blanks */
     int i = 0;
     while (cin[i] != 0) {
@@ -2747,7 +2787,8 @@ ca_device_t *alloc_ca_device() {
         LOG_AND_RETURN(NULL, "Could not allocate memory for CA device");
     }
     memset(d, 0, sizeof(ca_device_t));
-    d->max_ca_pmt = MAX_CA_PMT;
+    // maximum 1 channel per CA
+    d->max_ca_pmt = DEFAULT_CA_PMT;
     return d;
 }
 
@@ -2844,6 +2885,12 @@ int dvbca_close() {
     return 0;
 }
 
+int dvbca_add_pid(adapter *ad, SPMT *pmt, int pid) {
+    LOG("PMT %d, pid %d was added, invalidating pmt", pmt->id, pid);
+    pmt->version = -1;
+    return 0;
+}
+
 SCA_op dvbca;
 
 int ca_reconnect(void *arg) {
@@ -2882,6 +2929,7 @@ void dvbca_init() // you can search the devices here and fill the
     dvbca.ca_add_pmt = dvbca_process_pmt;
     dvbca.ca_del_pmt = dvbca_del_pmt;
     dvbca.ca_close_ca = dvbca_close;
+    dvbca.ca_add_pid = dvbca_add_pid;
     dvbca.ca_ts = NULL; // dvbca_ts;
     dvbca_id = add_ca(&dvbca, 0xFFFFFFFF);
     poller_sock = sockets_add(SOCK_TIMEOUT, NULL, -1, TYPE_UDP, NULL, NULL,
@@ -2903,7 +2951,7 @@ void set_ca_pin(int i, char *pin) {
     if (!ca_devices[i])
         return;
     memset(ca_devices[i]->pin_str, 0, sizeof(ca_devices[i]->pin_str));
-    strncpy(ca_devices[i]->pin_str, pin, sizeof(ca_devices[i]->pin_str) - 1);
+    safe_strncpy(ca_devices[i]->pin_str, pin);
 }
 
 void force_ci_adapter(int i) {
@@ -2916,8 +2964,8 @@ void force_ci_adapter(int i) {
 
 void set_ca_adapter_force_ci(char *o) {
     int i, j, la, st, end;
-    char buf[1000], *arg[40], *sep;
-    SAFE_STRCPY(buf, o);
+    char buf[strlen(o) + 1], *arg[40], *sep;
+    safe_strncpy(buf, o);
     la = split(arg, buf, ARRAY_SIZE(arg), ',');
     for (i = 0; i < la; i++) {
         sep = strchr(arg[i], '-');
@@ -2938,8 +2986,8 @@ void set_ca_adapter_force_ci(char *o) {
 
 void set_ca_adapter_pin(char *o) {
     int i, j, la, st, end;
-    char buf[1000], *arg[40], *sep, *seps;
-    SAFE_STRCPY(buf, o);
+    char buf[strlen(o) + 1], *arg[40], *sep, *seps;
+    safe_strncpy(buf, o);
     la = split(arg, buf, ARRAY_SIZE(arg), ',');
     for (i = 0; i < la; i++) {
         sep = strchr(arg[i], '-');
@@ -2961,16 +3009,21 @@ void set_ca_adapter_pin(char *o) {
     }
 }
 
-void set_ca_multiple_pmt(char *o) {
+void set_ca_channels(char *o) {
     int i, la, ddci;
-    char buf[1000], *arg[40], *sep, *seps;
-    SAFE_STRCPY(buf, o);
+    char buf[strlen(o) + 1], *arg[40], *sep, *seps;
+    safe_strncpy(buf, o);
     la = split(arg, buf, ARRAY_SIZE(arg), ',');
     for (i = 0; i < la; i++) {
         sep = strchr(arg[i], ':');
 
         if (!sep)
             continue;
+        int multiple_pmt = 0;
+        if (sep[1] == '*') {
+            sep++;
+            multiple_pmt = 1;
+        }
 
         int max_ca_pmt = atoi(sep + 1);
 
@@ -2979,10 +3032,10 @@ void set_ca_multiple_pmt(char *o) {
             ca_devices[ddci] = alloc_ca_device();
         if (!ca_devices[ddci])
             return;
-        ca_devices[ddci]->multiple_pmt = 1;
+        ca_devices[ddci]->multiple_pmt = multiple_pmt;
         ca_devices[ddci]->max_ca_pmt = max_ca_pmt;
-        LOG("Forcing CA %d to use multiple PMTs with maximum channels %d", ddci,
-            max_ca_pmt);
+        LOG("Forcing CA %d to use%s maximum channels %d", ddci,
+            multiple_pmt ? "multiple PMTs with" : "", max_ca_pmt);
         seps = sep;
         while ((seps = strchr(seps + 1, '-'))) {
             int caid = strtoul(seps + 1, NULL, 16);
