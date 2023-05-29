@@ -34,7 +34,7 @@ make
 
 Or run script install-minisatip.sh
 
->sudo chmod +x minisatip.sh && sudo ./minisatip.sh
+>sudo chmod +x install-minisatip.sh && sudo ./install-minisatip.sh
 
 Autostart after system reboot:
 >sudo crontab -e
